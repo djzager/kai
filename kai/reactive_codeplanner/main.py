@@ -2,6 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 
+from kai.analyzer import AnalyzerLSP
 from kai.kai_config import KaiConfig
 from kai.llm_interfacing.model_provider import ModelProvider
 from kai.reactive_codeplanner.agent.analyzer_fix.agent import AnalyzerAgent
@@ -102,11 +103,23 @@ def main() -> None:
     kai_config = KaiConfig.model_validate_filepath(args.kai_config)
     model_provider = ModelProvider(kai_config.models)
 
+    analyzer = AnalyzerLSP(
+        analyzer_lsp_server_binary=Path(args.analyzer_lsp_server_binary),
+        repo_directory=Path(args.source_directory),
+        rules_directory=Path(args.rules_directory),
+        analyzer_lsp_path=Path(args.analyzer_lsp_path),
+        analyzer_java_bundle_path=Path(args.analyzer_lsp_java_bundle),
+        dep_open_source_labels_path=Path(),
+    )
+
     task_manager = TaskManager(
         config,
         RepoContextManager(config.repo_directory),
         None,
-        validators=[MavenCompileStep(config), AnalyzerLSPStep(config)],
+        validators=[
+            MavenCompileStep(config),
+            AnalyzerLSPStep(config=config, analyzer=analyzer),
+        ],
         task_runners=[
             DependencyTaskRunner(
                 MavenDependencyAgent(model_provider, config.repo_directory)

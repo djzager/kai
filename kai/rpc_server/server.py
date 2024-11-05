@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
+from kai.analyzer import AnalyzerLSP
 from kai.analyzer_types import ExtendedIncident, Incident, RuleSet, Violation
 from kai.jsonrpc.core import JsonRpcApplication, JsonRpcServer
 from kai.jsonrpc.logs import JsonRpcLoggingHandler
@@ -64,6 +65,8 @@ class KaiRpcApplicationConfig(CamelCaseBaseModel):
 
 
 class KaiRpcApplication(JsonRpcApplication):
+    analyzer: AnalyzerLSP
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -93,8 +96,8 @@ def shutdown(
     app: KaiRpcApplication, server: JsonRpcServer, id: JsonRpcId, params: dict[str, Any]
 ) -> None:
     server.shutdown_flag = True
-    if app.analysis_validator is not None:
-        app.analysis_validator.stop()
+    if app.analyzer is not None:
+        app.analyzer.stop()
     server.send_response(id=id, result={})
 
 
@@ -103,8 +106,8 @@ def exit(
     app: KaiRpcApplication, server: JsonRpcServer, id: JsonRpcId, params: dict[str, Any]
 ) -> None:
     server.shutdown_flag = True
-    if app.analysis_validator is not None:
-        app.analysis_validator.stop()
+    if app.analyzer is not None:
+        app.analyzer.stop()
     server.send_response(id=id, result={})
 
 
@@ -165,18 +168,14 @@ def initialize(
             file_handler.setFormatter(formatter)
             app.log.addHandler(file_handler)
 
-        app.analysis_validator = AnalyzerLSPStep(
-            RpcClientConfig(
-                repo_directory=app.config.root_path,
-                analyzer_lsp_server_binary=app.config.analyzer_lsp_rpc_path,
-                rules_directory=app.config.analyzer_lsp_rules_path,
-                analyzer_lsp_path=app.config.analyzer_lsp_lsp_path,
-                analyzer_java_bundle_path=app.config.analyzer_lsp_java_bundle_path,
-                label_selector="konveyor.io/target=quarkus || konveyor.io/target=jakarta-ee",
-                incident_selector=None,
-                included_paths=None,
-                dep_open_source_labels_path=app.config.analyzer_lsp_dep_labels_path,
-            )
+        KaiRpcApplication.analyzer = AnalyzerLSP(
+            analyzer_lsp_server_binary=app.config.analyzer_lsp_rpc_path,
+            repo_directory=app.config.root_path,
+            rules_directory=app.config.analyzer_lsp_rules_path,
+            analyzer_lsp_path=app.config.analyzer_lsp_lsp_path,
+            analyzer_java_bundle_path=app.config.analyzer_lsp_java_bundle_path,
+            dep_open_source_labels_path=app.config.analyzer_lsp_dep_labels_path
+            or Path(),
         )
 
         app.log.info(f"Initialized with config: {app.config}")
@@ -211,6 +210,33 @@ def set_config(
     app.initialized = False
     try:
         initialize.func(app, server, id, KaiRpcApplicationConfig.model_validate(params))
+    except Exception as e:
+        server.send_response(
+            id=id,
+            error=JsonRpcError(
+                code=JsonRpcErrorCode.InternalError,
+                message=str(e),
+            ),
+        )
+
+
+@app.add_request(method="analysis_engine.Analyze")
+def doAnalyze(
+    app: KaiRpcApplication, server: JsonRpcServer, id: JsonRpcId, params: dict[str, Any]
+) -> None:
+    if not app.initialized:
+        server.send_response(id=id, error=ERROR_NOT_INITIALIZED)
+        return
+
+    try:
+        server.send_response(
+            id=id,
+            result=app.analyzer.run_analyzer_lsp(
+                label_selector=params.get("label_selector", ""),
+                included_paths=params.get("included_paths", []),
+                incident_selector=params.get("incident_selector", ""),
+            ),
+        )
     except Exception as e:
         server.send_response(
             id=id,
@@ -384,11 +410,13 @@ def get_codeplan_agent_solution(
         label_selector="konveyor.io/target=quarkus || konveyor.io/target=jakarta-ee",
         incident_selector=None,
         included_paths=None,
-        dep_open_source_labels_path=app.config.analyzer_lsp_dep_labels_path,
+        dep_open_source_labels_path=app.config.analyzer_lsp_dep_labels_path or Path(),
     )
 
     if app.analysis_validator is None:
-        app.analysis_validator = AnalyzerLSPStep(task_manager_config)
+        app.analysis_validator = AnalyzerLSPStep(
+            config=task_manager_config, analyzer=KaiRpcApplication.analyzer
+        )
 
     task_manager = TaskManager(
         config=task_manager_config,
